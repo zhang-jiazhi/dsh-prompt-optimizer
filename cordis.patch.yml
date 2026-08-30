@@ -1,0 +1,6 @@
+# @local/dsh-prompt-optimizer：输入框提示词优化器。
+# 宿主半边挂 /api/dsh-prompt-optimizer/* 路由与设置命名空间；客户端半边经
+# dsh.client.inject 自动进入 web 端（无需额外补丁行）。
+- insert:
+    - id: dsh-prompt-optimizer-host
+      name: '@local/dsh-prompt-optimizer'

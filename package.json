@@ -1,0 +1,45 @@
+{
+  "name": "@local/dsh-prompt-optimizer",
+  "version": "0.1.0",
+  "description": "将原作者 linshenkx 的 prompt-optimizer 移植到 DeepSeek Harness 的第三方插件",
+  "type": "module",
+  "main": "lib/index.js",
+  "scripts": {
+    "test": "node test/host-smoke.mjs && node test/client-smoke.mjs && node test/client-lifecycle-smoke.mjs"
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "AGPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhang-jiazhi/dsh-prompt-optimizer.git"
+  },
+  "homepage": "https://github.com/zhang-jiazhi/dsh-prompt-optimizer#readme",
+  "bugs": {
+    "url": "https://github.com/zhang-jiazhi/dsh-prompt-optimizer/issues"
+  },
+  "packageManager": "pnpm@10.33.0",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-cordis-client-runner",
+        "@deepseek-ai/dsh-client-connection"
+      ],
+      "platform": "web"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  }
+}
