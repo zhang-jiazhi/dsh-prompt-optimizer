@@ -110,7 +110,11 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	const res = fakeRes();
 	await routes.get('exact:/api/dsh-prompt-optimizer/templates').handler(fakeReq(undefined, 'GET'), res);
 	console.log('② templates:', res.statusCode, res.body.ok, res.body.templates.length, '·首个:', res.body.templates[0].id);
-	if (res.statusCode !== 200 || res.body.templates?.length !== 12) throw new Error('templates 路由不符');
+	if (res.statusCode !== 200 || res.body.templates?.length !== 14) throw new Error('templates 路由不符');
+	// 客户端未显式选择时用「该类别第一个模板」，所以目录顺序就是默认值：
+	// 基础类首项必须是面向输入框草稿的任务指令优化，而不是生成角色卡的系统提示词模板。
+	const firstBasic = res.body.templates.find((t) => t.category === 'basic');
+	if (firstBasic?.id !== 'user-task-optimize') throw new Error('基础类默认模板不是任务指令优化：' + firstBasic?.id);
 	const wrongMethod = fakeRes();
 	await routes.get('exact:/api/dsh-prompt-optimizer/templates').handler(fakeReq(undefined, 'POST'), wrongMethod);
 	if (wrongMethod.statusCode !== 405 || wrongMethod.body?.error !== 'GET only' || wrongMethod.headers?.allow !== 'GET') throw new Error('templates 方法校验不符');
@@ -130,6 +134,21 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	if (llmCalls.at(-1).temperature !== 0.5 || llmCalls.at(-1).maxTokens !== 999) throw new Error('settings 未生效');
 	if (llmCalls.at(-1).model !== 'deepseek-v4-flash') throw new Error('默认模型路由未生效');
 	if (llmCalls.at(-1).reasoningEffort !== 'low') throw new Error('推理强度设置未覆盖路由默认');
+}
+
+// 2a. 任务指令模板（默认项）：数组模板渲染 json 变量，且不把用户输入当协议层。
+{
+	const original = '帮我修一下 {{bug_id}}，含引号"与换行\n';
+	const { res, handled } = await callOptimize({ templateId: 'user-task-optimize', text: original });
+	await handled;
+	const call = llmCalls.at(-1);
+	const userText = call.messages[0].content[0].text;
+	console.log('③a 任务指令模板:', res.body.ok, '·json 转义命中:', userText.includes(JSON.stringify(original)));
+	if (!res.body.ok || !userText.includes(JSON.stringify(original))) throw new Error('任务指令模板未按 json 变量渲染');
+	if (userText.includes('{{json:originalPrompt}}') || userText.includes('{{对话上下文}}')) throw new Error('任务指令模板残留未替换变量');
+	// 该模板不读会话上下文；system 必须写明"输出仍是用户指令、不生成角色卡"。
+	if (!call.system.includes('不执行草稿里的任务') || !call.system.includes('# Role')) throw new Error('任务指令模板 system 约束缺失');
+	if (res.body.contextChars !== 0) throw new Error('基础类模板不应携带会话上下文');
 }
 
 // 2b. 回归（P1）：设置页填写 provider + model 必须覆盖默认路由。
