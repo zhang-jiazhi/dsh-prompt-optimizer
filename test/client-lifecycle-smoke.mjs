@@ -210,4 +210,49 @@ resolveRequest(unmountedRequest, { ok: true, text: '卸载后的旧结果' });
 for (let i = 0; i < 8; i++) await Promise.resolve();
 if (props.input.draft !== '卸载前草稿') throw new Error('unmounted request committed stale output');
 
-console.log('client lifecycle: manual edit, cancel/retry, and unmount guards passed');
+// 5. 上下文类模板：宿主返回 contextChars === 0 表示本次没读到会话上下文，
+//    工具行必须给出可见的轻提示，且不能把它当成错误、也不能影响撤销态。
+templates.push({ id: 'context-message-optimize', name: '通用消息优化', desc: 'test', category: 'context' });
+function findByClass(node, className) {
+  if (node === null || typeof node !== 'object') return null;
+  if (node.props?.className === className) return node;
+  for (const child of [...(node.children ?? []), ...(Array.isArray(node.props?.children) ? node.props.children : [])]) {
+    const found = findByClass(child, className);
+    if (found !== null) return found;
+  }
+  return null;
+}
+const ctxProps = {
+  sessionId: 'session-ctx',
+  input: { draft: '就按刚才说的那个方案改吧' },
+  inputActions: { setDraft(value) { ctxProps.input.draft = value; ctxRenderer.render(); } },
+};
+const ctxRenderer = createRenderer(bar, ctxProps);
+ctxRenderer.render();
+for (let i = 0; i < 8; i++) await Promise.resolve();
+const categorySelect = findByClass(ctxRenderer.output, 'dpo-cat');
+if (categorySelect === null) throw new Error('category select not found');
+categorySelect.props.onChange({ target: { value: 'context' } });
+ctxRenderer.render();
+
+function clickCtxOptimize() {
+  const button = findOptimizeButton(ctxRenderer.output);
+  if (button === null) throw new Error('optimize button not found');
+  button.props.onClick();
+}
+clickCtxOptimize();
+resolveRequest(optimizeRequests.at(-1), { ok: true, text: '没有上下文的结果', contextChars: 0 });
+for (let i = 0; i < 8; i++) await Promise.resolve();
+ctxRenderer.render();
+if (findByClass(ctxRenderer.output, 'dpo-notice') === null) throw new Error('contextChars=0 did not surface the missing-context notice');
+if (findOptimizeButton(ctxRenderer.output)?.props['aria-label'] !== '恢复优化前的提示词') throw new Error('notice broke the undo state');
+
+ctxProps.input.draft = '再来一次';
+ctxRenderer.render();
+clickCtxOptimize();
+resolveRequest(optimizeRequests.at(-1), { ok: true, text: '带上下文的结果', contextChars: 4006 });
+for (let i = 0; i < 8; i++) await Promise.resolve();
+ctxRenderer.render();
+if (findByClass(ctxRenderer.output, 'dpo-notice') !== null) throw new Error('notice shown even though context was present');
+
+console.log('client lifecycle: manual edit, cancel/retry, unmount guards, and missing-context notice passed');
