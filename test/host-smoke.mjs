@@ -110,7 +110,7 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	const res = fakeRes();
 	await routes.get('exact:/api/dsh-prompt-optimizer/templates').handler(fakeReq(undefined, 'GET'), res);
 	console.log('② templates:', res.statusCode, res.body.ok, res.body.templates.length, '·首个:', res.body.templates[0].id);
-	if (res.statusCode !== 200 || res.body.templates?.length !== 14) throw new Error('templates 路由不符');
+	if (res.statusCode !== 200 || res.body.templates?.length !== 15) throw new Error('templates 路由不符');
 	// 客户端未显式选择时用「该类别第一个模板」，所以目录顺序就是默认值：
 	// 基础类首项必须是面向输入框草稿的任务指令优化，而不是生成角色卡的系统提示词模板。
 	const firstBasic = res.body.templates.find((t) => t.category === 'basic');
@@ -518,7 +518,7 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 //     能力上限措辞列为禁写项。这条断言防止后续改模板时把核心理念删掉。
 {
 	const { TEMPLATES } = await import('../lib/templates.js');
-	const doctrineIds = ['user-task-optimize', 'user-task-planning', 'context-message-optimize', 'context-analytical-optimize', 'context-output-format-optimize'];
+	const doctrineIds = ['user-task-optimize', 'user-task-planning', 'secure-reverse-optimize', 'context-message-optimize', 'context-analytical-optimize', 'context-output-format-optimize'];
 	for (const id of doctrineIds) {
 		const tpl = TEMPLATES.find((t) => t.id === id);
 		const system = tpl.content.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
@@ -527,11 +527,17 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 		if (!system.includes('大白话解码')) throw new Error(id + ' 缺少大白话解码表');
 		if (!system.includes('该放开的要明说')) throw new Error(id + ' 缺少能力放开条款');
 	}
+	// 逆向/安全研究模板额外守卫：必须含全链路词表，且必须禁止替草稿虚构授权。
+	const secTpl = TEMPLATES.find((t) => t.id === 'secure-reverse-optimize');
+	const secSystem = secTpl?.content.find((m) => m.role === 'system')?.content ?? '';
+	for (const marker of ['大白话→专业术语映射', '虚构授权', '绕过密码验证', '脱壳', '取证']) {
+		if (!secSystem.includes(marker)) throw new Error('secure-reverse-optimize 缺少「' + marker + '」');
+	}
 	// 三个上下文模板共享同一段总纲：抽常量后必须仍然逐字同源。
 	const ctxSystems = TEMPLATES.filter((t) => t.category === 'context').map((t) => t.content.find((m) => m.role === 'system').content);
 	const ctxUsers = TEMPLATES.filter((t) => t.category === 'context').map((t) => t.content.find((m) => m.role === 'user').content);
 	const shared = ctxSystems.every((s) => s.startsWith(ctxSystems[0].slice(0, 2000)));
-	console.log('⑮ 理念守卫: 5 个模板通过 ·上下文总纲同源:', shared, '·user 三份一致:', ctxUsers[0] === ctxUsers[1] && ctxUsers[1] === ctxUsers[2]);
+	console.log('⑮ 理念守卫: 6 个模板通过 ·逆向词表在:', Boolean(secSystem), '·上下文总纲同源:', shared, '·user 三份一致:', ctxUsers[0] === ctxUsers[1] && ctxUsers[1] === ctxUsers[2]);
 	if (!shared || ctxUsers[0] !== ctxUsers[1] || ctxUsers[1] !== ctxUsers[2]) throw new Error('上下文模板公共部分已漂移');
 }
 
