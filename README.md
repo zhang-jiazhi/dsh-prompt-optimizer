@@ -121,6 +121,7 @@ npm test          # 宿主 + 客户端兼容性/生命周期验证，无需启�
 
 ## 来源、致谢与协议
 
+- 社区：[LINUX DO](https://linux.do)（本项目发布与讨论社区）
 - 原项目与原作者：[linshenkx/prompt-optimizer](https://github.com/linshenkx/prompt-optimizer)
 - DSH 插件结构参考：[seven282/oss-prompt-optimizer](https://github.com/seven282/oss-prompt-optimizer)
 - 模板文本源自原项目；本项目保留原项目归属并同样以 AGPL-3.0 发布，详见 [LICENSE](./LICENSE)
