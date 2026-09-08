@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-prompt-optimizer",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "将原作者 linshenkx 的 prompt-optimizer 移植到 DeepSeek Harness 的第三方插件",
   "type": "module",
   "main": "lib/index.js",
@@ -14,9 +14,13 @@
   },
   "files": [
     "lib",
+    "templates",
     "cordis.patch.yml",
     "README.md"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "license": "AGPL-3.0",
   "repository": {
     "type": "git",

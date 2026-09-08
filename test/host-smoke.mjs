@@ -1,6 +1,6 @@
 // 宿主最小验证：mock webServer/llm/settings/agentDefaultModel/sessionQuery，
 // 走通模板目录、优化、上下文、未知模板、空文本、取消、越权七条路径。
-import { apply } from '../lib/index.js';
+import { apply, settingsReady } from '../lib/index.js';
 
 const routes = new Map();
 const llmCalls = [];
@@ -102,8 +102,24 @@ async function callOptimize(payload) {
 }
 
 apply(fakeCtx);
+// schemastery 改为动态导入后，设置注册在下一个微任务完成；settingsReady 是
+// 模块级 live binding，apply 之后重新读取即可拿到本次注册的 promise。
+await settingsReady;
 console.log('① 注册的路由:', [...routes.keys()]);
 if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名空间未注册');
+
+// 0. 设置 schema 工厂：真实 schemastery 下默认值可解析（依赖缺失时 apply 会降级）。
+{
+	const { buildConfigSchema } = await import('../lib/index.js');
+	const z = (await import('@deepseek-ai/schemastery')).default;
+	const schema = buildConfigSchema(z);
+	const resolved = schema({});
+	console.log('⓪ 设置 schema 默认:', resolved.reasoningEffort, resolved.maxTokens, resolved.contextMaxChars);
+	if (resolved.reasoningEffort !== 'inherit' || resolved.maxTokens !== 8192 || resolved.contextMaxChars !== 4000) {
+		throw new Error('设置 schema 默认值不符');
+	}
+	if (typeof schema.toJSON() !== 'object' || schema.toJSON() === null) throw new Error('设置 schema toJSON 不符');
+}
 
 // 1. 模板目录
 {
@@ -353,6 +369,47 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	}
 }
 
+// 10d. 回归（P0-1）：字符预算不足时必须保住最新对话，而不是保住最旧的。
+{
+	const many = [];
+	for (let i = 1; i <= 8; i++) {
+		const role = i % 2 ? 'user' : 'assistant';
+		const text = `第${i}条头` + 'X'.repeat(1000) + `第${i}条尾`;
+		const message = { role, content: [{ type: 'text', text }] };
+		many.push({
+			type: role === 'user' ? 'user/message' : 'assistant/message',
+			data: role === 'user' ? message : { turn: i, step: 0, message },
+			surfaceOp: 'append',
+		});
+	}
+	const savedSession = fakeCtx.services.sessionQuery;
+	fakeCtx.services.sessionQuery = { readSurface: async () => ({ events: many }) };
+
+	// 预算 2000：最新一条完整保留，最旧一条被丢弃。
+	settingsValue = { contextMaxMessages: 8, contextMaxChars: 2000 };
+	const full = await callOptimize({ templateId: 'context-message-optimize', text: '最新这条', sessionId: 's-budget' });
+	await full.handled;
+	const fullText = llmCalls.at(-1).messages[0].content[0].text;
+	const keepsNewest = fullText.includes('第8条头') && fullText.includes('第8条尾');
+	const dropsOldest = !fullText.includes('第1条');
+	console.log('⑩d 上下文预算:', full.res.body.ok, '·含最新:', keepsNewest, '·含最旧:', !dropsOldest, '·chars:', full.res.body.contextChars);
+	if (!full.res.body.ok || !keepsNewest || !dropsOldest) {
+		throw new Error('字符预算截断没有保住最新对话（P0-1 回归）');
+	}
+	if (full.res.body.contextChars > 2000 + '…（已截断）'.length) throw new Error('上下文超出预算标记范围');
+
+	// 预算 500：最新一条自身超预算时保留它的尾部（结论在尾部）。
+	settingsValue = { contextMaxMessages: 8, contextMaxChars: 500 };
+	const tail = await callOptimize({ templateId: 'context-message-optimize', text: '最新这条', sessionId: 's-budget' });
+	await tail.handled;
+	const tailText = llmCalls.at(-1).messages[0].content[0].text;
+	console.log('⑩e 超长单条:', tailText.includes('第8条尾'), '·含开头:', tailText.includes('第8条头'));
+	if (!tail.res.body.ok || !tailText.includes('第8条尾')) throw new Error('超长最新消息没有保留尾部（P0-1 回归）');
+
+	fakeCtx.services.sessionQuery = savedSession;
+	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
+}
+
 // 10b. 回归（P1）：上下文读取也必须受同一个 deadline 约束，不能无限阻塞并
 //      在超时后才启动模型。底层 readSession 暂不接受 signal，本插件用 Promise 竞速。
 {
@@ -580,6 +637,115 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 
 	fakeCtx.services.llm = savedLlm;
 	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
+}
+
+// 16c. 输出守卫（P0-4）：前缀剥离 + 角色卡泄漏 + 占位符丢失，只告警不重试。
+{
+	const savedLlm = fakeCtx.services.llm;
+	let calls = 0;
+	fakeCtx.services.llm = {
+		async *stream() {
+			calls += 1;
+			yield { type: 'text-delta', index: 0, text: '优化后：# Role: 测试\n## Profile\n- 变量没保留' };
+			yield { type: 'finish', reason: { kind: 'stop' } };
+		},
+	};
+	const { res, handled } = await callOptimize({ templateId: 'user-task-optimize', text: '把 {{keep_me}} 修一下' });
+	await handled;
+	fakeCtx.services.llm = savedLlm;
+	const codes = (res.body.warnings ?? []).map((warning) => warning.code);
+	console.log('⑯c 输出守卫:', res.body.ok, '·', JSON.stringify(codes), '·调用:', calls);
+	if (!res.body.ok || calls !== 1) throw new Error('输出守卫不应触发重试');
+	for (const code of ['prefix-stripped', 'role-card-leak', 'placeholder-missing']) {
+		if (!codes.includes(code)) throw new Error('输出守卫缺少告警：' + code);
+	}
+	if (String(res.body.text).startsWith('优化后')) throw new Error('前缀没有被剥离');
+}
+
+// 16d. 角色卡模板豁免 + 短草稿超长输出告警。
+{
+	const savedLlm = fakeCtx.services.llm;
+	fakeCtx.services.llm = {
+		async *stream() {
+			yield { type: 'text-delta', index: 0, text: '# Role: 测试\n## Profile\n- ok' };
+			yield { type: 'finish', reason: { kind: 'stop' } };
+		},
+	};
+	const role = await callOptimize({ templateId: 'general-optimize', text: '写个角色卡' });
+	await role.handled;
+	const roleCodes = (role.res.body.warnings ?? []).map((warning) => warning.code);
+	if (roleCodes.includes('role-card-leak')) throw new Error('角色卡模板被误判为跑偏');
+
+	fakeCtx.services.llm = {
+		async *stream() {
+			yield { type: 'text-delta', index: 0, text: 'A'.repeat(1500) };
+			yield { type: 'finish', reason: { kind: 'stop' } };
+		},
+	};
+	const verbose = await callOptimize({ templateId: 'user-task-optimize', text: '写个爬虫' });
+	await verbose.handled;
+	fakeCtx.services.llm = savedLlm;
+	const verboseCodes = (verbose.res.body.warnings ?? []).map((warning) => warning.code);
+	console.log('⑯d 豁免/注水:', JSON.stringify(roleCodes), JSON.stringify(verboseCodes));
+	if (!verboseCodes.includes('verbose')) throw new Error('短草稿超长输出没有告警');
+}
+
+// 17. token 用量透传（客户端用于显示耗时/token）。
+{
+	const savedLlm = fakeCtx.services.llm;
+	fakeCtx.services.llm = {
+		async *stream() {
+			yield { type: 'usage', usage: { inputTokens: 1234, outputTokens: 56, totalTokens: 1290, reasoningTokens: 10, privateField: 'x' } };
+			yield { type: 'text-delta', index: 0, text: '结果' };
+			yield { type: 'finish', reason: { kind: 'stop' } };
+		},
+	};
+	const { res, handled } = await callOptimize({ templateId: 'user-task-optimize', text: '用量测试' });
+	await handled;
+	fakeCtx.services.llm = savedLlm;
+	console.log('⑰ usage 透传:', JSON.stringify(res.body.usage));
+	if (res.body.usage?.inputTokens !== 1234 || res.body.usage?.outputTokens !== 56 || 'privateField' in res.body.usage) {
+		throw new Error('usage 透传不符');
+	}
+}
+
+// 18. inherit = 不传 reasoningEffort（跟随模型默认），不再跟随 agent 默认模型的 max。
+{
+	const savedLlm = fakeCtx.services.llm;
+	const seen = [];
+	fakeCtx.services.llm = {
+		async *stream(options) {
+			seen.push(options.reasoningEffort);
+			yield { type: 'text-delta', index: 0, text: 'ok' };
+			yield { type: 'finish', reason: { kind: 'stop' } };
+		},
+	};
+	settingsValue = { reasoningEffort: 'inherit' };
+	const { handled } = await callOptimize({ templateId: 'user-task-optimize', text: 'inherit 测试' });
+	await handled;
+	fakeCtx.services.llm = savedLlm;
+	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
+	console.log('⑱ inherit 档位:', JSON.stringify(seen));
+	if (seen.length !== 1 || seen[0] !== undefined) throw new Error('inherit 仍然传了 reasoningEffort');
+}
+
+// 19. 模板外置（templates/*.md）与图生图虚假声明修复（P0-3）。
+{
+	const { TEMPLATES: live, TEMPLATE_DIR } = await import('../lib/templates.js');
+	const fs = await import('node:fs');
+	const files = fs.readdirSync(TEMPLATE_DIR).filter((name) => name.endsWith('.md'));
+	console.log('⑲ 模板文件:', files.length, '·目录:', TEMPLATE_DIR);
+	if (files.length !== live.length) throw new Error('模板文件数与目录条数不一致');
+	for (const template of live) {
+		const system = Array.isArray(template.content)
+			? template.content.find((message) => message.role === 'system')?.content ?? ''
+			: template.content;
+		if (system.includes('{{include:')) throw new Error('模板残留 include 标记：' + template.id);
+	}
+	const image2image = live.find((template) => template.id === 'image2image-general-optimize');
+	const text = Array.isArray(image2image.content) ? image2image.content.map((message) => message.content).join('\n') : image2image.content;
+	if (/图片(?:会随请求)?直接附带|已经直接附带|先理解这张图片/.test(text)) throw new Error('图生图模板仍宣称图片已附带（P0-3 回归）');
+	if (!text.includes('看不到原图')) throw new Error('图生图模板缺少“看不到原图”的显式约束');
 }
 
 console.log('\n全部通过 ✅');
