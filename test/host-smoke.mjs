@@ -584,6 +584,23 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 		if (!system.includes('大白话解码')) throw new Error(id + ' 缺少大白话解码表');
 		if (!system.includes('该放开的要明说')) throw new Error(id + ' 缺少能力放开条款');
 	}
+	// 任务指令类必须带「强约束分层 + 六要素完整度」规范（0.6.0 增量）：
+	// 目标侧约束写硬、方法侧镣铐不写，且完整度要求写进 system 与 user 两侧。
+	for (const id of ['user-task-optimize', 'user-task-planning', 'secure-reverse-optimize']) {
+		const tpl = TEMPLATES.find((t) => t.id === id);
+		const system = tpl.content.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+		if (!system.includes('目标侧约束')) throw new Error(id + ' 缺少「目标侧约束写硬」条款');
+		if (!system.includes('方法侧镣铐')) throw new Error(id + ' 缺少「方法侧镣铐不写」条款');
+	}
+	const taskTpl = TEMPLATES.find((t) => t.id === 'user-task-optimize');
+	const taskSystem = taskTpl.content.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+	for (const marker of ['六要素', '完成标准', '末尾重申', '一条约束一行']) {
+		if (!taskSystem.includes(marker)) throw new Error('user-task-optimize 缺少「' + marker + '」');
+	}
+	const taskUser = taskTpl.content.find((m) => m.role === 'user')?.content ?? '';
+	if (!taskUser.includes('六要素是否齐全') || !taskUser.includes('方法侧镣铐')) {
+		throw new Error('user-task-optimize 自检未覆盖完整度与约束分层');
+	}
 	// 逆向/安全研究模板额外守卫：必须含全链路词表，且必须禁止替草稿虚构授权。
 	const secTpl = TEMPLATES.find((t) => t.id === 'secure-reverse-optimize');
 	const secSystem = secTpl?.content.find((m) => m.role === 'system')?.content ?? '';

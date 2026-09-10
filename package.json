@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-prompt-optimizer",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "将原作者 linshenkx 的 prompt-optimizer 移植到 DeepSeek Harness 的第三方插件",
   "type": "module",
   "main": "lib/index.js",
