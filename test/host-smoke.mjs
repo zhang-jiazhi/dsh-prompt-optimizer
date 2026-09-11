@@ -571,8 +571,14 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	if (!userText.includes('<对话上下文>')) throw new Error('上下文证据缺少边界标签');
 }
 
-// 14. 模板理念守卫：四个改写类模板必须写着「不给助手戴镣铐」，并把常见的
-//     能力上限措辞列为禁写项。这条断言防止后续改模板时把核心理念删掉。
+// 14. 模板理念守卫（双向）：既要挡住"凭空给助手加镣铐"，也要挡住
+//     "把用户明写的约束/身份句删掉"。
+//
+//     0.6.1 修正：旧版只写了"草稿没说的不要写"，没写"草稿明说的必须保留"。
+//     实测后果（本机真实模型 3 次/句）：用户自己写的「只改这一处 / 最小改动 /
+//     不要加新依赖 / 先问我再动手」保留 0/3，「不要重构」1/3，「限制在 100 行内」
+//     2/3；草稿开头的「你是X专家」被抹掉或降级成"以X的视角/水准"。
+//     因此本块同时断言两个方向，任一侧被改坏都会失败。
 {
 	const { TEMPLATES } = await import('../lib/templates.js');
 	const doctrineIds = ['user-task-optimize', 'user-task-planning', 'secure-reverse-optimize', 'context-message-optimize', 'context-analytical-optimize', 'context-output-format-optimize'];
@@ -585,12 +591,27 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 		if (!system.includes('该放开的要明说')) throw new Error(id + ' 缺少能力放开条款');
 	}
 	// 任务指令类必须带「强约束分层 + 六要素完整度」规范（0.6.0 增量）：
-	// 目标侧约束写硬、方法侧镣铐不写，且完整度要求写进 system 与 user 两侧。
+	// 目标侧约束写硬、草稿没说的方法侧镣铐不写，完整度写进 system 与 user 两侧。
 	for (const id of ['user-task-optimize', 'user-task-planning', 'secure-reverse-optimize']) {
 		const tpl = TEMPLATES.find((t) => t.id === id);
 		const system = tpl.content.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
 		if (!system.includes('目标侧约束')) throw new Error(id + ' 缺少「目标侧约束写硬」条款');
 		if (!system.includes('方法侧镣铐')) throw new Error(id + ' 缺少「方法侧镣铐不写」条款');
+	}
+	// 0.6.1 反向守卫 A：用户明写的约束必须明确要求"保留/照搬"，且必须点明
+	// 「删用户的约束 = 篡改意图」这一层（只写"不要新增"会退化成实测里的删约束）。
+	for (const id of doctrineIds) {
+		const tpl = TEMPLATES.find((t) => t.id === id);
+		const system = tpl.content.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+		if (!system.includes('照搬')) throw new Error(id + ' 缺少「草稿明写的约束照搬」条款');
+		if (!system.includes('篡改')) throw new Error(id + ' 缺少「删用户约束=篡改意图」说明');
+	}
+	// 0.6.1 反向守卫 B：身份句必须"原样保留在开场"，且必须禁止降级成"以X的视角/水准"。
+	for (const id of doctrineIds) {
+		const tpl = TEMPLATES.find((t) => t.id === id);
+		const system = tpl.content.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+		if (!system.includes('身份句')) throw new Error(id + ' 缺少「身份句保真」条款');
+		if (!system.includes('降级')) throw new Error(id + ' 没有禁止把身份句降级成"以X的视角"');
 	}
 	const taskTpl = TEMPLATES.find((t) => t.id === 'user-task-optimize');
 	const taskSystem = taskTpl.content.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
@@ -600,6 +621,11 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	const taskUser = taskTpl.content.find((m) => m.role === 'user')?.content ?? '';
 	if (!taskUser.includes('六要素是否齐全') || !taskUser.includes('方法侧镣铐')) {
 		throw new Error('user-task-optimize 自检未覆盖完整度与约束分层');
+	}
+	// 0.6.1 反向守卫 C：user 侧自检必须同时覆盖"约束全保留"与"身份句"两项，
+	// 否则模型看不到最后一公里的检查项。
+	if (!taskUser.includes('反向数一遍') || !taskUser.includes('身份句')) {
+		throw new Error('user-task-optimize 自检未覆盖「约束保真」与「身份句保真」');
 	}
 	// 逆向/安全研究模板额外守卫：必须含全链路词表，且必须禁止替草稿虚构授权。
 	const secTpl = TEMPLATES.find((t) => t.id === 'secure-reverse-optimize');
