@@ -1,0 +1,62 @@
+{
+  "note": "效果回归样本集：需要真实模型 + 运行中的 web 实例，因此不进 npm test。用法：node test/effect-regression.mjs。样本来源：0.6.1 与 0.6.2 两轮修复的真实 A/B 用例（原样本存在 /tmp，已丢失，这里固化）。",
+  "endpoint": "http://127.0.0.1:3080/api/dsh-prompt-optimizer/optimize",
+  "cases": [
+    {
+      "id": "explicit-constraints-preserved",
+      "purpose": "用户明写的约束一条不许删（0.6.1 P0-1；修复前 6/24）",
+      "templateId": "user-task-optimize",
+      "draft": "改这个函数，只改这一处，不要重构别的代码，最小改动，不要加新依赖，限制在 100 行内，先问我再动手，必须补上回归测试",
+      "mustContain": ["只改这一处", "不要重构", "最小改动", "不要加新依赖", "100 行", "先问我", "测试"],
+      "mustNotContain": []
+    },
+    {
+      "id": "identity-line-preserved",
+      "purpose": "草稿开头的身份句原样保留在开场，不降级（0.6.1 P0-2；修复前 1/15）",
+      "templateId": "user-task-optimize",
+      "draft": "你是 Three.js 高级图形工程师，擅长水体着色，实现 water.js",
+      "mustContain": ["你是", "Three.js", "水体着色"],
+      "mustNotContain": ["以 Three.js 的视角", "以 Three.js 的水准", "你将成为"]
+    },
+    {
+      "id": "no-invented-constraints",
+      "purpose": "反向：草稿没写的工作方式限制一条都不许新增",
+      "templateId": "user-task-optimize",
+      "draft": "那个插件超时太短了，调一下",
+      "mustContain": [],
+      "mustNotContain": ["最小改动", "不要重构", "先问我", "不要加新依赖", "最小化改动"]
+    },
+    {
+      "id": "dangling-reference-cleared",
+      "purpose": "指代解析不出来时，未解析的指代不得留在正文（0.6.2；修复前 4/4 命中）",
+      "templateId": "user-task-optimize",
+      "draft": "修复它",
+      "mustContain": [],
+      "mustNotContain": ["「它」", "指代的对象", "指代的问题", "以对话上下文为准", "之前提到的"]
+    },
+    {
+      "id": "explicit-object-not-degraded",
+      "purpose": "反向：对象已给全时不得被误降级成阻塞态",
+      "templateId": "user-task-optimize",
+      "draft": "把 ~/sission 的签到脚本登录失败的问题修好，别再犯了",
+      "mustContain": ["~/sission", "签到脚本"],
+      "mustNotContain": ["阻塞项", "对象未知"]
+    },
+    {
+      "id": "placeholder-preserved",
+      "purpose": "双花括号变量占位符逐字保留",
+      "templateId": "user-task-optimize",
+      "draft": "把 {{user_name}} 的 {{date}} 签到记录导出",
+      "mustContain": ["{{user_name}}", "{{date}}"],
+      "mustNotContain": []
+    },
+    {
+      "id": "language-preserved",
+      "purpose": "英文进英文出，不被强制翻成中文",
+      "templateId": "user-task-optimize",
+      "draft": "fix the login bug in auth.js",
+      "mustContain": ["auth.js"],
+      "mustNotContain": ["登录问题修复"]
+    }
+  ]
+}

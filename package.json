@@ -1,11 +1,12 @@
 {
   "name": "@local/dsh-prompt-optimizer",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "将原作者 linshenkx 的 prompt-optimizer 移植到 DeepSeek Harness 的第三方插件",
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
-    "test": "node test/host-smoke.mjs && node test/client-smoke.mjs && node test/client-lifecycle-smoke.mjs"
+    "test": "node test/host-smoke.mjs && node test/client-smoke.mjs && node test/client-lifecycle-smoke.mjs",
+    "test:effect": "node test/effect-regression.mjs"
   },
   "exports": {
     ".": "./lib/index.js",
