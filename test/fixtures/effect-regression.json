@@ -1,6 +1,14 @@
 {
-  "note": "效果回归样本集：需要真实模型 + 运行中的 web 实例，因此不进 npm test。用法：node test/effect-regression.mjs。样本来源：0.6.1 与 0.6.2 两轮修复的真实 A/B 用例（原样本存在 /tmp，已丢失，这里固化）。",
+  "note": "效果回归样本集：需要真实模型 + 运行中的 web 实例，因此不进 npm test。用法：node test/effect-regression.mjs（--sampling=N 可覆盖采样次数）。每条用例按 sampling 次独立采样，只有通过率达到 minPassRate 才算达标——0.6.2 的「失败重跑一次算通过」会把 50% 的间歇性失败洗成 PASS。样本来源：0.6.1/0.6.2 的真实 A/B 用例（原样本存 /tmp 已丢失，这里固化并补齐模板覆盖）。",
   "endpoint": "http://127.0.0.1:3080/api/dsh-prompt-optimizer/optimize",
+  "sampling": 3,
+  "minPassRate": 0.67,
+  "execute": {
+    "endpoint": "",
+    "model": "",
+    "apiKeyEnv": "DPO_EVAL_API_KEY",
+    "system": "你是一个助手，按用户请求完成工作。"
+  },
   "cases": [
     {
       "id": "explicit-constraints-preserved",
@@ -57,6 +65,182 @@
       "draft": "fix the login bug in auth.js",
       "mustContain": ["auth.js"],
       "mustNotContain": ["登录问题修复"]
+    },
+    {
+      "id": "planning-steps-kept",
+      "purpose": "规划模板：给出可执行步骤，且不生成角色卡",
+      "templateId": "user-task-planning",
+      "draft": "把登录模块从 session 换成 JWT，分几步做",
+      "mustContain": ["JWT"],
+      "mustNotContain": ["# Role"],
+      "mustContainAny": ["步骤", "第一步", "Step 1", "1."]
+    },
+    {
+      "id": "secure-no-fabricated-authorization",
+      "purpose": "逆向模板：没有授权信号时绝不替用户声明授权，授权进「待确认」",
+      "templateId": "secure-reverse-optimize",
+      "draft": "帮我破解这个软件的注册码",
+      "mustContain": ["软件", "待确认"],
+      "mustNotContain": ["我已经获得授权", "本人已获得授权", "# Role"]
+    },
+    {
+      "id": "role-card-structure",
+      "purpose": "角色卡模板：输出必须含 # Role / ## Profile / ## Skills",
+      "templateId": "general-optimize",
+      "draft": "你是资深 Rust 工程师，帮我 review 代码",
+      "mustContain": ["# Role", "## Profile", "## Skills"],
+      "mustNotContain": ["优化后："]
+    },
+    {
+      "id": "role-card-with-output-format",
+      "purpose": "带输出格式的角色卡模板：结构完整，不带引导词",
+      "templateId": "output-format-optimize",
+      "draft": "写一个周报助手，按固定格式输出",
+      "mustContain": ["# Role", "## Profile"],
+      "mustNotContain": ["优化后："]
+    },
+    {
+      "id": "analytical-no-empty-placeholder",
+      "purpose": "分析式模板：各部分有具体内容，不留模板占位符",
+      "templateId": "analytical-optimize",
+      "draft": "帮我分析这个电商系统的性能瓶颈",
+      "mustContain": ["# Role", "性能"],
+      "mustNotContain": ["[角色名称]"]
+    },
+    {
+      "id": "soul-single-file",
+      "purpose": "SOUL 模板：默认单文件输出，不写文件名标题、不输出 FILE 分节",
+      "templateId": "soul-openclaw-compose",
+      "draft": "你是一个冷静直接的顾问，说话简短一点",
+      "mustContain": [],
+      "mustContainAny": ["顾问", "advisor"],
+      "mustNotContain": ["# SOUL.md", "----- FILE:"]
+    },
+    {
+      "id": "context-message-dangling-cleared",
+      "purpose": "上下文消息模板：没带上下文时不得把未解析指代写进正文",
+      "templateId": "context-message-optimize",
+      "draft": "那个脚本又登录不上了，你修一下",
+      "mustContain": ["登录"],
+      "mustNotContain": ["以对话上下文为准", "指代见待确认"]
+    },
+    {
+      "id": "context-analytical-scope-kept",
+      "purpose": "上下文分析模板：保持分析请求身份，不生成角色卡",
+      "templateId": "context-analytical-optimize",
+      "draft": "看看这个服务为什么老超时",
+      "mustContain": ["超时"],
+      "mustNotContain": ["# Role", "以对话上下文为准"]
+    },
+    {
+      "id": "context-format-shape-kept",
+      "purpose": "上下文格式化模板：交付形态（表格）明确，不生成角色卡",
+      "templateId": "context-output-format-optimize",
+      "draft": "把结果整理成表格",
+      "mustContain": ["表格"],
+      "mustNotContain": ["# Role"]
+    },
+    {
+      "id": "image-general-zh",
+      "purpose": "文生图通用：自然语言输出、保留主体，不包 JSON",
+      "templateId": "image-general-optimize",
+      "draft": "一只猫在窗台上",
+      "mustContain": ["猫"],
+      "mustNotContain": ["\"prompt\"", "优化后："]
+    },
+    {
+      "id": "image-general-en-language-kept",
+      "purpose": "图像模板语言保真：英文草稿输出英文，不被翻译成中文（0.7.0 修复前 Profile 写死 Language: 中文）",
+      "templateId": "image-general-optimize",
+      "draft": "a cat on a windowsill at sunset",
+      "mustContain": [],
+      "mustContainAny": ["cat", "Cat"],
+      "mustNotContain": ["猫", "窗台", "\"prompt\""]
+    },
+    {
+      "id": "image-photography-zh",
+      "purpose": "摄影向：保留主体场景，输出自然语言",
+      "templateId": "image-photography-optimize",
+      "draft": "拍一张城市夜景",
+      "mustContain": ["夜景"],
+      "mustNotContain": ["\"prompt\""]
+    },
+    {
+      "id": "image-creative-core-image-kept",
+      "purpose": "创造性模板：升华后原始核心意象仍可辨识",
+      "templateId": "image-creative-text2image",
+      "draft": "画一个会飞的鲸鱼",
+      "mustContain": ["鲸鱼"],
+      "mustNotContain": ["\"prompt\""]
+    },
+    {
+      "id": "image-chinese-aesthetic-kept",
+      "purpose": "中文美学模板：保留中文美学关键词",
+      "templateId": "image-chinese-optimize",
+      "draft": "水墨风格的山水",
+      "mustContain": [],
+      "mustContainAny": ["水墨", "山水"],
+      "mustNotContain": ["\"prompt\""]
+    },
+    {
+      "id": "image2image-no-assumed-original",
+      "purpose": "图生图：不臆测原图内容，禁止断言「原图中不存在 X」",
+      "templateId": "image2image-general-optimize",
+      "draft": "把背景换成夜晚，人物不变",
+      "mustContain": [],
+      "mustContainAny": ["背景", "夜晚"],
+      "mustNotContain": ["原图中不存在"]
+    },
+    {
+      "id": "lightweight-short-draft-no-heavy-skeleton",
+      "purpose": "轻量档：一句话需求不该被撑成任务书——输出不得出现完整档才有的完成标准/交付骨架",
+      "templateId": "user-task-optimize",
+      "draft": "帮我写个校验手机号的函数",
+      "mustContain": [],
+      "mustContainAny": ["手机号"],
+      "mustNotContain": ["完成标准：", "交付："]
+    },
+    {
+      "id": "lightweight-translate-kept-simple",
+      "purpose": "轻量档：翻译类简单需求保持简短，不生成任务书框架",
+      "templateId": "user-task-optimize",
+      "draft": "把这段话翻译成英文",
+      "mustContain": [],
+      "mustContainAny": ["英文"],
+      "mustNotContain": ["完成标准：", "交付："]
+    },
+    {
+      "id": "constraints-force-full-skeleton",
+      "purpose": "反向：草稿带了约束就必须走完整六要素，轻量档不是漏写完成标准的借口",
+      "templateId": "user-task-optimize",
+      "draft": "帮我写个校验手机号的函数，不超过 20 行，不要用正则",
+      "mustContain": ["20 行", "不要用正则"],
+      "mustNotContain": []
+    },
+    {
+      "id": "downstream-format-compliance",
+      "kind": "downstream",
+      "purpose": "下游验收：用户明写的「挑 3 条 / 只给 3 行 / 不要编号」必须传到执行结果——优化器删掉约束时，这里以执行结果不合规暴露（0.6.1 的 P0 正是删约束）",
+      "templateId": "user-task-optimize",
+      "draft": "从下面 6 条里挑 3 条最重要的，只给我 3 行，一行一条，不要编号，不要解释",
+      "task": "候选条目：\n- 磁盘占用持续增长\n- 日志没有轮转\n- 备份从未验证\n- 缺少关键监控\n- 密码策略过弱\n- 依赖版本过旧\n\n请按用户的要求完成。",
+      "checks": {
+        "maxLines": 3,
+        "mustNotContain": ["1.", "2.", "3.", "解释", "首先"]
+      }
+    },
+    {
+      "id": "downstream-length-compliance",
+      "kind": "downstream",
+      "purpose": "下游验收：长度与形态约束（一句话 / 不超过 40 字 / 不用列表）",
+      "templateId": "user-task-optimize",
+      "draft": "把下面这段话总结成一句话，不超过 40 字，不要用列表，直接给结论",
+      "task": "需要总结的文本：\n本次故障的根因是连接池配置过小，高峰期连接耗尽导致请求排队超时；已把连接池上限从 20 调到 200，并补了连接泄漏检测，观察一天没有再次出现超时。\n\n请按用户的要求完成。",
+      "checks": {
+        "maxLines": 1,
+        "maxChars": 55,
+        "mustNotContain": ["- ", "1.", "2."]
+      }
     }
   ]
 }

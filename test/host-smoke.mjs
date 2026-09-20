@@ -287,6 +287,52 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	if (!(res.body.ok && llmCalls.at(-1).maxTokens === 8192 && llmCalls.at(-1).temperature === 0.3)) throw new Error('数值钳制不符');
 }
 
+// 6e. 地板值/天花板边界（QA task-4 指出的覆盖缺口：原先只测 maxTokens=0→8192，
+//     没断言 1..63 与 1..9 两个边界，也没断言上限）。数值全部来自 lib/index.js 的
+//     MIN_MAX_TOKENS=64 / MIN_TIMEOUT_MS=10 / MAX_* 常数。
+{
+	const cases = [
+		{ label: 'maxTokens 1 → 地板 64', settings: { maxTokens: 1 }, expect: { maxTokens: 64 } },
+		{ label: 'maxTokens 63 → 地板 64', settings: { maxTokens: 63 }, expect: { maxTokens: 64 } },
+		{ label: 'maxTokens 65 → 原值', settings: { maxTokens: 65 }, expect: { maxTokens: 65 } },
+		{ label: 'maxTokens 1e9 → 天花板 65536', settings: { maxTokens: 1e9 }, expect: { maxTokens: 65536 } },
+	];
+	for (const c of cases) {
+		settingsValue = { temperature: 0.5, ...c.settings };
+		const { res, handled } = await callOptimize({ templateId: 'general-optimize', text: '边界' });
+		await handled;
+		const got = llmCalls.at(-1) ?? {};
+		for (const [k, want] of Object.entries(c.expect)) {
+			if (got[k] !== want) {
+				throw new Error(`边界不符 [${c.label}]：${k} 期望 ${want}，实际 ${got[k]}（res.ok=${res.body?.ok}）`);
+			}
+		}
+		console.log('⑥e', c.label, '✓');
+	}
+	// timeoutMs 不在 stream(options) 里（它是 handler 层 deadline），只能按行为断言：
+	// 地板 10ms 的意义是「极小值不会把 deadline 压成立即超时」。用桩流正常返回，
+	// 若地板失效（timeoutMs=1 直接生效）则请求会以 timeout 结束。
+	for (const t of [1, 9, 10]) {
+		settingsValue = { temperature: 0.5, timeoutMs: t };
+		streamMode = 'ok';
+		const { res, handled } = await callOptimize({ templateId: 'general-optimize', text: '超时地板' });
+		await handled;
+		if (res.body?.error === 'timeout') {
+			throw new Error(`timeoutMs=${t} 被压成立即超时：地板值未生效`);
+		}
+		console.log('⑥e timeoutMs', t, '→ 未立即超时 ✓（body.ok=', res.body?.ok, '）');
+	}
+	// 上下文预算上限：极大值必须被钳到 MAX_CONTEXT_MAX_CHARS(20000)，
+	// 而不是原样放大单次请求（QA 报的「可放大到 40 万字符」）。
+	settingsValue = { temperature: 0.5, contextMaxMessages: 200, contextMaxChars: 100000000 };
+	const big = await callOptimize({ templateId: 'context-message-optimize', text: '上限', sessionId: 's-ceil' });
+	await big.handled;
+	const chars = big.res.body.contextChars ?? 0;
+	console.log('⑥e 上下文上限: chars =', chars);
+	if (chars > 20000 + '…（已截断）'.length) throw new Error(`contextMaxChars 天花板未生效：${chars}`);
+	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
+}
+
 // 6d. integer-only settings are normalized defensively even if persisted data bypasses schema validation.
 {
 	settingsValue = { maxTokens: 99.9, timeoutMs: 50.9, maxInputChars: 8000.8 };
@@ -295,6 +341,44 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
 	console.log('⑥d 整数化:', res.body.ok, '· maxTokens:', llmCalls.at(-1).maxTokens);
 	if (!res.body.ok || llmCalls.at(-1).maxTokens !== 99) throw new Error('整数设置未规范化');
+}
+
+// 6e. 回归（二轮 P3）：deadline 提前到 body 读取之前，慢滴流的 body 也受 timeoutMs
+//     约束——修复前 body 阶段只绑客户端断开信号，恶意/异常客户端可以无限挂住 handler。
+{
+	const hangListeners = {};
+	const hangReq = {
+		method: 'POST',
+		headers: { host: '127.0.0.1:3080' },
+		socket: { remoteAddress: '127.0.0.1' },
+		on(ev, fn) { (hangListeners[ev] ??= []).push(fn); return this; },
+		off(ev, fn) { hangListeners[ev] = (hangListeners[ev] ?? []).filter((item) => item !== fn); return this; },
+		listenerCount(ev) { return (hangListeners[ev] ?? []).length; },
+		resume() { return this; },
+	};
+	settingsValue = { timeoutMs: 50 };
+	const res = fakeRes();
+	const started = Date.now();
+	await routes.get('exact:/api/dsh-prompt-optimizer/optimize').handler(hangReq, res);
+	const elapsed = Date.now() - started;
+	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
+	console.log('⑥e body 超时:', res.body?.error, '· handler ms:', elapsed, '· data 监听残留:', hangReq.listenerCount('data'));
+	if (res.body?.error !== 'timeout' || elapsed > 500) throw new Error('body 阶段没有受 timeoutMs 约束（二轮 P3 回归）');
+	if (hangReq.listenerCount('data') !== 0) throw new Error('body 超时后 readBody 未清理监听');
+}
+
+// 6f. 回归（二轮 P3）：maxInputChars floor 提到 200（与设置页 UI min 一致）——
+//     floor=1 时任何输入都会被 400，优化功能整体不可用。
+{
+	settingsValue = { maxInputChars: 1 };
+	const ok = await callOptimize({ templateId: 'general-optimize', text: '短文本' });
+	await ok.handled;
+	const blocked = await callOptimize({ templateId: 'general-optimize', text: 'x'.repeat(201) });
+	await blocked.handled;
+	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
+	console.log('⑥f 输入地板:', ok.res.body.ok, '· 201 字:', blocked.res.body.error);
+	if (!ok.res.body.ok) throw new Error('maxInputChars=1 没有被地板到 200（二轮 P3 回归）');
+	if (blocked.res.body.ok !== false) throw new Error('maxInputChars 地板后 200 上限没有生效');
 }
 
 // 7. 越权（非 loopback）→ 403
@@ -520,6 +604,22 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	console.log('⑬c 正常路径无重试:', third.res.body.ok, '· 调用次数:', normal.length, '· 档位:', JSON.stringify(normal));
 	if (!third.res.body.ok || normal.length !== 1 || normal[0] !== 'low') throw new Error('正常路径被误判为需要回退');
 
+	// ④ 回归（二轮 P3）：适配层把拒绝包装成中文文案时同样要能回退，只认英文会漏。
+	const localized = [];
+	fakeCtx.services.llm = {
+		stream(options) {
+			localized.push(options.reasoningEffort);
+			return (async function* () {
+				throw new Error('该模型不支持推理强度档位 "medium"');
+			})();
+		},
+	};
+	settingsValue = { reasoningEffort: 'medium' };
+	const fourth = await callOptimize({ templateId: 'user-task-optimize', text: '中文报错也回退' });
+	await fourth.handled;
+	console.log('⑬d 中文档位拒绝:', fourth.res.body.ok, '· 调用档位:', JSON.stringify(localized), '·', fourth.res.body.error);
+	if (localized.length !== 2 || fourth.res.body.ok !== false) throw new Error('中文形态的不支持档位未触发一次回退（二轮 P3 回归）');
+
 	fakeCtx.services.llm = savedLlm;
 	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
 }
@@ -623,6 +723,10 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	if (!taskUser.includes('六要素是否齐全') || !taskUser.includes('方法侧镣铐')) {
 		throw new Error('user-task-optimize 自检未覆盖完整度与约束分层');
 	}
+	// 轻量档（0.7.1）：简单草稿不能被撑成任务书；system 与 user 两侧都要有这条，
+	// 否则「六要素优先补齐」会把一句话需求也扩成带完成标准/交付的报告骨架。
+	if (!taskSystem.includes('轻量档')) throw new Error('user-task-optimize 缺少「轻量档」条款');
+	if (!taskUser.includes('轻量档')) throw new Error('user-task-optimize 自检未覆盖轻量档');
 	// 0.6.1 反向守卫 C：user 侧自检必须同时覆盖"约束全保留"与"身份句"两项，
 	// 否则模型看不到最后一公里的检查项。
 	if (!taskUser.includes('反向数一遍') || !taskUser.includes('身份句')) {
@@ -634,11 +738,20 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	for (const marker of ['大白话→专业术语映射', '虚构授权', '绕过密码验证', '脱壳', '取证']) {
 		if (!secSystem.includes(marker)) throw new Error('secure-reverse-optimize 缺少「' + marker + '」');
 	}
+	// 图像类模板此前在 Profile 里写死 `Language: 中文`，英文草稿会被翻译成中文
+	// （ctx-core 铁律 8「中文进中文出」只覆盖任务/上下文类）。中文美学模板是有意
+	// 中文，其余图像模板必须声明"跟随输入语言"。
+	for (const id of ['image-general-optimize', 'image-photography-optimize', 'image-creative-text2image', 'image2image-general-optimize']) {
+		const tpl = TEMPLATES.find((t) => t.id === id);
+		const system = tpl.content.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
+		if (/-\s*[Ll]anguage:\s*中文/.test(system)) throw new Error(id + ' 把输出语言写死成中文，英文草稿会被翻译');
+		if (!system.includes('跟随输入语言')) throw new Error(id + ' 缺少「输出语言跟随输入」声明');
+	}
 	// 三个上下文模板共享同一段总纲：抽常量后必须仍然逐字同源。
 	const ctxSystems = TEMPLATES.filter((t) => t.category === 'context').map((t) => t.content.find((m) => m.role === 'system').content);
 	const ctxUsers = TEMPLATES.filter((t) => t.category === 'context').map((t) => t.content.find((m) => m.role === 'user').content);
 	const shared = ctxSystems.every((s) => s.startsWith(ctxSystems[0].slice(0, 2000)));
-	console.log('⑮ 理念守卫: 6 个模板通过 ·逆向词表在:', Boolean(secSystem), '·上下文总纲同源:', shared, '·user 三份一致:', ctxUsers[0] === ctxUsers[1] && ctxUsers[1] === ctxUsers[2]);
+	console.log('⑮ 理念守卫: 6 个模板通过 ·逆向词表在:', Boolean(secSystem), '·图像语言跟随:', true, '·上下文总纲同源:', shared, '·user 三份一致:', ctxUsers[0] === ctxUsers[1] && ctxUsers[1] === ctxUsers[2]);
 	if (!shared || ctxUsers[0] !== ctxUsers[1] || ctxUsers[1] !== ctxUsers[2]) throw new Error('上下文模板公共部分已漂移');
 }
 
@@ -678,6 +791,26 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	console.log('⑯b 真截断不重试:', cut.res.body.ok, '· 调用次数:', truncated.length);
 	if (cut.res.body.ok !== false || truncated.length !== 1) throw new Error('真截断不应重试');
 	if (!String(cut.res.body.error).includes('思考 token')) throw new Error('截断文案未说明思考 token 也占预算');
+
+	// ⑯c 回归（二轮 P3）：放宽预算重试后再失败，文案必须引用实际使用的 widened
+	// 预算（4096*4=16384），而不是引导用户去调已经不起作用的原始 4096。
+	const widenedBudgets = [];
+	fakeCtx.services.llm = {
+		async *stream(options) {
+			widenedBudgets.push(options.maxTokens);
+			yield { type: 'finish', reason: { kind: 'max-tokens' } };
+		},
+	};
+	settingsValue = { maxTokens: 4096 };
+	const twice = await callOptimize({ templateId: 'user-task-optimize', text: '预算重试后再截断' });
+	await twice.handled;
+	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
+	console.log('⑯c 双失败文案:', twice.res.body.error, '· 预算序列:', JSON.stringify(widenedBudgets));
+	if (widenedBudgets.length !== 2 || widenedBudgets[1] !== 16384) throw new Error('预算重试序列不符');
+	const doubleFailMessage = String(twice.res.body.error);
+	if (!doubleFailMessage.includes('16384') || doubleFailMessage.includes('（4096）')) {
+		throw new Error('双失败文案没有引用 widened 预算（二轮 P3 回归）');
+	}
 
 	fakeCtx.services.llm = savedLlm;
 	settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
@@ -840,6 +973,93 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	console.log('⑯g 围栏剥离: 6 种形态符合预期（正文代码块不破坏）');
 }
 
+// 16h. 约束账本：0.6.1 的 P0「用户明写的约束被删」此前只有 prompt 层兜底，
+//      代码守卫只查占位符 / JSON 键路径 / 带中文量词的数字——「不要重构 /
+//      只改这一处 / 先问我再动手 / 最小改动」被整条删掉时 warnings 仍是 []。
+{
+	const savedLlm = fakeCtx.services.llm;
+	const run = async (draft, output, templateId = 'user-task-optimize') => {
+		fakeCtx.services.llm = {
+			async *stream() {
+				yield { type: 'text-delta', index: 0, text: output };
+				yield { type: 'finish', reason: { kind: 'stop' } };
+			},
+		};
+		const { res, handled } = await callOptimize({ templateId, text: draft });
+		await handled;
+		return (res.body.warnings ?? []).map((warning) => warning.code);
+	};
+
+	const draft = '改这个函数，只改这一处，不要重构别的代码，最小改动，不要加新依赖，限制在 100 行内，先问我再动手，必须补上回归测试';
+
+	// 反例：约束整条被删 → 必须命中。
+	const deleted = await run(draft, '目标：修改该函数，做完告诉我结果。');
+	if (!deleted.includes('constraint-missing')) throw new Error('用户明写的约束被整条删除没有告警');
+
+	// 反例：只删掉其中几条也要命中（数字还在时 explicit-number 不会报，只有账本能发现）。
+	const partial = await run(draft, '目标：修改该函数。\n约束：\n- 只改这一处\n- 不要加新依赖\n- 限制在 100 行内');
+	if (!partial.includes('constraint-missing')) throw new Error('部分约束被删没有告警');
+
+	// 误报回归：换近义词 / 调整语序（仍是同一批约束）不得告警。
+	const synonym = await run(
+		draft,
+		'目标：修改该函数。\n约束：\n- 只改这一处\n- 不要重构其他代码\n- 最小化改动\n- 不要新增依赖\n- 限制在 100 行内\n- 先向我确认后再动手\n- 补上回归测试',
+	);
+	if (synonym.includes('constraint-missing')) throw new Error('同义改写被误报为删约束：' + JSON.stringify(synonym));
+
+	// 非任务类模板：完全删除要报，正常润色（避免…）不报。
+	const imageDropped = await run('一只猫，不要出现文字', '一只猫在窗台上，柔和光线。', 'image-general-optimize');
+	if (!imageDropped.includes('constraint-missing')) throw new Error('图像模板里约束被删除没有告警');
+	const imageKept = await run('一只猫，不要出现文字', '一只猫在窗台上，避免画面出现文字。', 'image-general-optimize');
+	if (imageKept.includes('constraint-missing')) throw new Error('图像模板正常润色被误报：' + JSON.stringify(imageKept));
+
+	fakeCtx.services.llm = savedLlm;
+	console.log('⑯h 约束账本: 整条删除 / 部分删除 / 图像删除均命中 · 同义改写与图像润色不误报');
+}
+
+// 16i. 约束账本（新增侧）：文档里排第二的故障是"凭空给助手戴镣铐"（intent-rules
+//      铁律 4 / task-tail 反例都在骂），但代码层此前零防守——草稿只说
+//      「调大超时」，输出却写「最小改动 / 不要重构 / 先问再动手」不会告警。
+//      这里同时断言 ledger 统计透传（客户端据此显示变更摘要）。
+{
+	const savedLlm = fakeCtx.services.llm;
+	let ledger = null;
+	const run = async (draft, output, templateId = 'user-task-optimize') => {
+		fakeCtx.services.llm = {
+			async *stream() {
+				yield { type: 'text-delta', index: 0, text: output };
+				yield { type: 'finish', reason: { kind: 'stop' } };
+			},
+		};
+		const { res, handled } = await callOptimize({ templateId, text: draft });
+		await handled;
+		ledger = res.body.ledger;
+		return (res.body.warnings ?? []).map((warning) => warning.code);
+	};
+
+	// 反例：草稿没写工作方式限制，输出凭空加了三条 → 必须命中。
+	const invented = await run(
+		'那个插件超时太短了，调一下',
+		'目标：把插件超时调大。\n约束：\n- 最小改动，不要重构无关代码。\n- 先问我再动手，必须补上回归测试。',
+	);
+	if (!invented.includes('constraint-invented')) throw new Error('凭空新增方法侧镣铐没有告警');
+	const inventedLedger = ledger;
+	if (!(inventedLedger?.invented >= 3) || inventedLedger?.dropped !== 0) throw new Error('ledger 统计不符：' + JSON.stringify(inventedLedger));
+
+	// 正例：草稿自己写了这些限制，照搬不算新增。
+	const own = await run('最小改动，不要重构，先问我', '约束：\n- 最小改动\n- 不要重构\n- 先问我');
+	const ownLedger = ledger;
+	if (own.includes('constraint-invented')) throw new Error('用户自己写的约束被误报为新增：' + JSON.stringify(own));
+	if (ownLedger?.kept !== 3 || ownLedger?.invented !== 0) throw new Error('草稿自带约束的 ledger 统计不符：' + JSON.stringify(ownLedger));
+
+	// 正例：正常改写（无凭空新增）不得误报。
+	const clean = await run('把超时调大点', '把插件超时调大，改完说明改了哪里。');
+	if (clean.includes('constraint-invented')) throw new Error('正常改写被误报为新增镣铐：' + JSON.stringify(clean));
+
+	fakeCtx.services.llm = savedLlm;
+	console.log('⑯i 约束新增侧: 凭空戴镣铐命中 · 草稿自带/正常改写不误报 · ledger 统计:', JSON.stringify({ invented: inventedLedger?.invented, kept: ownLedger?.kept }));
+}
+
 // 17. token 用量透传（客户端用于显示耗时/token）。
 {
 	const savedLlm = fakeCtx.services.llm;
@@ -969,8 +1189,8 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 }
 
 // 23. 效果回归样本集自检：fixtures 只在手动 `npm run test:effect` 时被读取，
-//     文件写坏了（JSON 语法错、模板 id 拼错、断言数组缺失）不会有任何提示。
-//     这里做结构校验，把它纳入常规回归。
+//     文件写坏了（JSON 语法错、模板 id 拼错、断言数组缺失）或新增模板忘了补
+//     样本，不会有任何提示。这里做结构校验 + 模板覆盖断言，纳入常规回归。
 {
 	const fs = await import('node:fs');
 	const { join, dirname } = await import('node:path');
@@ -978,22 +1198,156 @@ if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名�
 	const here = dirname(fileURLToPath(import.meta.url));
 	const fixture = JSON.parse(fs.readFileSync(join(here, 'fixtures', 'effect-regression.json'), 'utf8'));
 	if (!Array.isArray(fixture.cases) || fixture.cases.length === 0) throw new Error('效果回归样本集为空');
+	if (!Number.isInteger(fixture.sampling) || fixture.sampling <= 0) throw new Error('fixture.sampling 必须是正整数');
+	if (typeof fixture.minPassRate !== 'number' || fixture.minPassRate <= 0 || fixture.minPassRate > 1) {
+		throw new Error('fixture.minPassRate 必须落在 (0, 1]');
+	}
 	const { TEMPLATES } = await import('../lib/templates.js');
 	const ids = new Set(TEMPLATES.map((template) => template.id));
 	const seenIds = new Set();
+	const covered = new Set();
 	for (const testCase of fixture.cases) {
 		if (typeof testCase.id !== 'string' || testCase.id === '') throw new Error('样本缺少 id');
 		if (seenIds.has(testCase.id)) throw new Error('样本 id 重复：' + testCase.id);
 		seenIds.add(testCase.id);
 		if (!ids.has(testCase.templateId)) throw new Error(`样本 ${testCase.id} 指向不存在的模板：${testCase.templateId}`);
+		covered.add(testCase.templateId);
+		if (testCase.kind === 'downstream') {
+			if (typeof testCase.task !== 'string' || testCase.task === '') throw new Error(`下游样本 ${testCase.id} 缺少 task`);
+			const checks = testCase.checks ?? {};
+			const assertionCount = (checks.mustContain?.length ?? 0) + (checks.mustNotContain?.length ?? 0)
+				+ (typeof checks.maxLines === 'number' ? 1 : 0) + (typeof checks.maxChars === 'number' ? 1 : 0);
+			if (assertionCount === 0) throw new Error(`下游样本 ${testCase.id} 没有任何断言`);
+			continue;
+		}
 		if (!Array.isArray(testCase.mustContain) || !Array.isArray(testCase.mustNotContain)) {
 			throw new Error(`样本 ${testCase.id} 缺少 mustContain / mustNotContain 数组`);
 		}
-		if (testCase.mustContain.length === 0 && testCase.mustNotContain.length === 0) {
+		const anyCount = Array.isArray(testCase.mustContainAny) ? testCase.mustContainAny.length : 0;
+		if (anyCount === 0 && testCase.mustContain.length === 0 && testCase.mustNotContain.length === 0) {
 			throw new Error(`样本 ${testCase.id} 没有任何断言`);
 		}
 	}
-	console.log('㉓ 效果回归样本集:', fixture.cases.length, '条 · 模板引用全部有效');
+	// 模板覆盖率：新增模板忘了补效果样本时，效果回归会静默漏测这个模板。
+	const uncovered = [...ids].filter((id) => !covered.has(id));
+	console.log('㉓ 效果回归样本集:', fixture.cases.length, '条 · 模板覆盖', `${covered.size}/${ids.size}`, '· 采样', fixture.sampling, '· 未覆盖:', JSON.stringify(uncovered));
+	if (uncovered.length > 0) throw new Error('以下模板没有效果样本，效果回归会漏测：' + uncovered.join('、'));
+}
+
+// 24. 模板坏文件降级（二轮 P2）：单个模板写坏只跳过并告警，绝不连坐整个插件
+//     ——修复前 TEMPLATES 在模块导入时执行，一个坏 JSON 头/双 USER 标记/include
+//     循环会让整个插件加载失败（全站 500）。热加载重解析失败时降级用 lastGood 快照。
+//     用 /tmp 沙箱副本测（TEMPLATE_DIR 由 import.meta.url 推导，拷贝 lib 即换目录）。
+{
+	const fs = await import('node:fs');
+	const os = await import('node:os');
+	const { join, dirname } = await import('node:path');
+	const { fileURLToPath, pathToFileURL } = await import('node:url');
+	const here = dirname(fileURLToPath(import.meta.url));
+	const sandbox = fs.mkdtempSync(join(os.tmpdir(), 'dpo-tpl-degrade-'));
+	try {
+		fs.mkdirSync(join(sandbox, 'lib'), { recursive: true });
+		fs.mkdirSync(join(sandbox, 'templates', '_shared'), { recursive: true });
+		fs.copyFileSync(join(here, '..', 'lib', 'templates.js'), join(sandbox, 'lib', 'templates.js'));
+		const goodBody = JSON.stringify({ id: 'good-one', name: '好模板', desc: 'ok', category: 'basic', order: 1 }) + '\n正文 {{include:common}}';
+		fs.writeFileSync(join(sandbox, 'templates', 'good-one.md'), goodBody);
+		fs.writeFileSync(join(sandbox, 'templates', 'bad-json.md'), '这不是 JSON 头\n正文');
+		fs.writeFileSync(join(sandbox, 'templates', 'bad-two-user.md'), JSON.stringify({ id: 'bad-two-user', name: '双标记', desc: 'ok', category: 'basic', order: 2 }) + '\nA\n<!-- USER -->\nB\n<!-- USER -->\nC');
+		fs.writeFileSync(join(sandbox, 'templates', 'bad-loop.md'), JSON.stringify({ id: 'bad-loop', name: '循环', desc: 'ok', category: 'basic', order: 3 }) + '\n{{include:loop-a}}');
+		fs.writeFileSync(join(sandbox, 'templates', '_shared', 'common.md'), '公共段');
+		fs.writeFileSync(join(sandbox, 'templates', '_shared', 'loop-a.md'), 'A {{include:loop-b}}');
+		fs.writeFileSync(join(sandbox, 'templates', '_shared', 'loop-b.md'), 'B {{include:loop-a}}');
+
+		const warnings = [];
+		const originalWarn = console.warn;
+		console.warn = (...args) => { warnings.push(args.map(String).join(' ')); };
+		let degraded;
+		try {
+			degraded = await import(pathToFileURL(join(sandbox, 'lib', 'templates.js')).href);
+		} finally {
+			console.warn = originalWarn;
+		}
+		const ids = degraded.TEMPLATES.map((template) => template.id);
+		console.log('㉔ 坏文件降级: 导入不抛 · 可用:', JSON.stringify(ids), '· 告警', warnings.length, '条');
+		if (JSON.stringify(ids) !== JSON.stringify(['good-one'])) throw new Error('坏模板没有按文件跳过：' + JSON.stringify(ids));
+		if (degraded.TEMPLATES[0].content !== '正文 公共段') throw new Error('好模板内容不符：' + JSON.stringify(degraded.TEMPLATES[0].content));
+		for (const needle of ['bad-json', 'bad-two-user', 'bad-loop']) {
+			if (!warnings.some((warning) => warning.includes(needle))) throw new Error('坏文件未逐条告警：' + needle);
+		}
+
+		// 热加载兜底：把好文件也写坏 → 重解析整体失败 → 降级用 lastGood 快照；修好 → 自愈。
+		console.warn = (...args) => { warnings.push(args.map(String).join(' ')); };
+		try {
+			const snapshot = degraded.getTemplates();
+			const target = join(sandbox, 'templates', 'good-one.md');
+			fs.writeFileSync(target, '全坏了');
+			const stat = fs.statSync(target);
+			fs.utimesSync(target, stat.atime, new Date(stat.mtimeMs + 5000));
+			const degradedSnapshot = degraded.getTemplates();
+			if (JSON.stringify(degradedSnapshot) !== JSON.stringify(snapshot)) {
+				throw new Error('重载失败没有降级用 lastGood 快照：' + JSON.stringify(degradedSnapshot));
+			}
+			if (!warnings.some((warning) => warning.includes('上一次成功加载的模板快照'))) {
+				throw new Error('降级时没有告警');
+			}
+			fs.writeFileSync(target, goodBody);
+			const recoveredStat = fs.statSync(target);
+			fs.utimesSync(target, recoveredStat.atime, new Date(recoveredStat.mtimeMs + 5000));
+			const recovered = degraded.getTemplates();
+			console.log('     热加载兜底: 重载失败用快照 · 修好后恢复:', recovered.length, '条');
+			if (recovered.length !== 1 || recovered[0].id !== 'good-one') throw new Error('修好后没有恢复正常加载');
+		} finally {
+			console.warn = originalWarn;
+		}
+	} finally {
+		fs.rmSync(sandbox, { recursive: true, force: true });
+	}
+}
+
+// 25. validate 三处修复的正反用例（二轮 P3）：身份句空白归一 / 角色卡 #{1,6} /
+//     指代兜底跳过「已知 / 待确认」节。直接调 validateOptimizedOutput，不经路由。
+{
+	const { validateOptimizedOutput } = await import('../lib/validate.js');
+	const tpl = { id: 'user-task-optimize' };
+	const codes = (result) => result.warnings.map((warning) => warning.code);
+
+	// 身份句：内容一致、仅空白差异（全角空格/缩进）不得误报；真被删必须报。
+	const identitySpaced = validateOptimizedOutput({
+		template: tpl,
+		draft: '你是资深　Python 性能专家，负责性能调优',
+		output: '你是资深 Python 性能专家，负责性能调优。\n目标：定位并消除热点。',
+	});
+	console.log('㉕ 身份句归一:', JSON.stringify(codes(identitySpaced)));
+	if (codes(identitySpaced).includes('identity-dropped')) throw new Error('身份句仅空白差异被误报（二轮 P3 回归）');
+	const identityGone = validateOptimizedOutput({
+		template: tpl,
+		draft: '你是资深 Python 性能专家，负责性能调优',
+		output: '以资深专家的视角完成性能调优。',
+	});
+	if (!codes(identityGone).includes('identity-dropped')) throw new Error('身份句被删未告警');
+
+	// 角色卡：四级/六级深层标题现在也要命中（#{1,6}）；普通中文标题不误报。
+	const deepCard = validateOptimizedOutput({ template: tpl, draft: '修复登录', output: '#### Profile\n- 精通渗透' });
+	if (!codes(deepCard).includes('role-card-leak')) throw new Error('#### 深层角色卡未告警（二轮 P3 回归）');
+	const h6Card = validateOptimizedOutput({ template: tpl, draft: '修复登录', output: '###### Role\nx' });
+	if (!codes(h6Card).includes('role-card-leak')) throw new Error('###### 深层角色卡未告警');
+	const notCard = validateOptimizedOutput({ template: tpl, draft: '修复登录', output: '### 目标\n修复登录失败。' });
+	if (codes(notCard).includes('role-card-leak')) throw new Error('普通中文标题被误判为角色卡');
+
+	// 指代：长草稿的合法回指写在「已知」节里不得误报；同样的句子出现在正文必须报。
+	const knownQuote = validateOptimizedOutput({
+		template: tpl,
+		draft: '修复它',
+		output: '目标：修复该问题。\n已知：草稿提到之前说的登录失败。\n待确认（可先按合理默认推进）：\n- 之前提到的对象指哪个',
+	});
+	console.log('㉕ 指代范围:', JSON.stringify(codes(knownQuote)));
+	if (codes(knownQuote).includes('dangling-reference')) throw new Error('「已知」节的合法回指被误报（二轮 P3 回归）');
+	const bodyDangling = validateOptimizedOutput({
+		template: tpl,
+		draft: '修复它',
+		output: '目标：修复之前说的那个问题。\n已知：草稿只有一句。',
+	});
+	if (!codes(bodyDangling).includes('dangling-reference')) throw new Error('正文里的未解析指代未告警');
 }
 
 console.log('\n全部通过 ✅');

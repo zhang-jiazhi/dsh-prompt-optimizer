@@ -146,9 +146,15 @@ for (let i = 0; i < 8; i++) await Promise.resolve();
 if (renderer.output === null || optimizeRequests.length !== 0) throw new Error('template catalog did not settle');
 
 function clickOptimize() {
-  const button = findOptimizeButton(renderer.output);
-  if (button === null) throw new Error('optimize button not found');
-  button.props.onClick();
+	const button = findOptimizeButton(renderer.output);
+	if (button === null) throw new Error('optimize button not found');
+	button.props.onClick();
+}
+/** 任意渲染器实例上的优化按钮点击（useInput 锁定测试的第二个组件实例用）。 */
+function clickOptimizeOn(targetRenderer) {
+	const button = findOptimizeButton(targetRenderer.output);
+	if (button === null) throw new Error('optimize button not found');
+	button.props.onClick();
 }
 function resolveRequest(request, body, init) {
   const status = init?.status ?? 200;
@@ -302,6 +308,96 @@ if (findByClass(ctxRenderer.output, 'dpo-notice') !== null) throw new Error('not
   }
 }
 
+// 7b. 约束账本摘要：宿主返回 ledger 且真有漂移时才显示，没漂移不显示。
+{
+  ctxProps.input.draft = '约束摘要测试';
+  ctxRenderer.render();
+  clickCtxOptimize();
+  resolveRequest(optimizeRequests.at(-1), {
+    ok: true,
+    text: '优化后的结果',
+    ms: 900,
+    ledger: { kept: 5, dropped: 2, invented: 1 },
+  });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  ctxRenderer.render();
+  const noticeText = String(findByClass(ctxRenderer.output, 'dpo-notice')?.children?.[0] ?? '');
+  if (!noticeText.includes('约束核对：约束丢失 2 · 新增约束 1')) {
+    throw new Error('ledger drift summary not rendered: ' + noticeText);
+  }
+
+  // 无漂移：不得凭空多一行噪音。
+  ctxProps.input.draft = '约束无漂移测试';
+  ctxRenderer.render();
+  clickCtxOptimize();
+  resolveRequest(optimizeRequests.at(-1), {
+    ok: true,
+    text: '优化后的结果',
+    ms: 900,
+    ledger: { kept: 3, dropped: 0, invented: 0 },
+  });
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  ctxRenderer.render();
+  const quietNotice = String(findByClass(ctxRenderer.output, 'dpo-notice')?.children?.[0] ?? '');
+  if (quietNotice.includes('约束核对')) throw new Error('ledger summary shown without any drift: ' + quietNotice);
+}
+
+// 7c. 模板预选：切到某类别且该类别没手动选过时，按草稿特征预选（只改默认值）。
+//     代码类草稿（含路径 / 报错 / 测试）应预选到任务指令优化，而不是该类别第一条。
+//     用全新渲染器 = hook 状态干净 = 模拟"用户从没手动选过"。
+{
+  const preselectProps = {
+    sessionId: 'session-preselect',
+    input: { draft: '修复 src/auth.js 的登录报错，改完跑一下测试' },
+    inputActions: { setDraft() {} },
+  };
+  const preselectRenderer = createRenderer(bar, preselectProps);
+  preselectRenderer.render();
+  // 模板目录是异步拉取的：先让 fetch 的 promise 落地，否则 pickCategory 里
+  // templates 还是 null，预选无从谈起（这正是假绿的来源）。
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  preselectRenderer.render();
+  const catSelect = findByClass(preselectRenderer.output, 'dpo-cat');
+  if (catSelect === null) throw new Error('category select not found for preselect test');
+  // 先切走再切回 basic，模拟"该类别没有记住的选择"。
+  catSelect.props.onChange({ target: { value: 'context' } });
+  preselectRenderer.render();
+  findByClass(preselectRenderer.output, 'dpo-cat').props.onChange({ target: { value: 'basic' } });
+  preselectRenderer.render();
+  const label = String(findByClass(preselectRenderer.output, 'dpo-tpl')?.props?.title ?? '');
+  if (!label.includes('任务指令优化')) {
+    throw new Error('code draft did not preselect 任务指令优化：' + label);
+  }
+
+  // 反向守卫：用户手动选过的模板不能被预选覆盖。
+  // 打开下拉选「通用优化」，再把草稿换成图像类文案后切类别回来——必须仍是通用优化。
+  findByClass(preselectRenderer.output, 'dpo-tpl').props.onClick();
+  preselectRenderer.render();
+  const options = [];
+  (function collect(node) {
+    if (node === null || typeof node !== 'object') return;
+    if (Array.isArray(node)) { node.forEach(collect); return; }
+    if (typeof node.props?.className === 'string' && node.props.className.split(' ').includes('dpo-item')) options.push(node);
+    (node.children ?? []).forEach(collect);
+  })(preselectRenderer.output);
+  const textOf = (node) => {
+    if (node === null || node === undefined) return '';
+    if (typeof node === 'string' || typeof node === 'number') return String(node);
+    if (Array.isArray(node)) return node.map(textOf).join('');
+    return (node.children ?? []).map(textOf).join('');
+  };
+  const generalOption = options.find((option) => textOf(option).includes('通用优化'));
+  if (generalOption === undefined) throw new Error('template dropdown option not found');
+  generalOption.props.onClick();
+  preselectRenderer.render();
+  findByClass(preselectRenderer.output, 'dpo-cat').props.onChange({ target: { value: 'context' } });
+  preselectRenderer.render();
+  findByClass(preselectRenderer.output, 'dpo-cat').props.onChange({ target: { value: 'basic' } });
+  preselectRenderer.render();
+  const kept = String(findByClass(preselectRenderer.output, 'dpo-tpl')?.props?.title ?? '');
+  if (!kept.includes('通用优化')) throw new Error('manual template choice was overwritten by preselect: ' + kept);
+}
+
 // 8. 优化中：类别选择器禁用、按钮变取消、显示计时；再次点击可取消。
 {
   ctxProps.input.draft = '忙碌态测试';
@@ -383,5 +479,67 @@ if (findByClass(ctxRenderer.output, 'dpo-notice') !== null) throw new Error('not
   failRenderer.unmount();
 }
 
+// 11. useInput 引用锁定（二轮 P2，Rules of Hooks）：首渲染用 useRef 锁定
+//     props.useInput——之后每渲染都调用同一引用（hook 链稳定），prop 后续出现/
+//     消失/换函数都不改变调用与否；首渲染没有就整个生命周期都不调用。
+{
+	let useInputCalls = 0;
+	const hostUseInput = function () {
+		useInputCalls += 1;
+		return { draft: 'hook 草稿' };
+	};
+	const lockProps = {
+		sessionId: 'session-lock',
+		useInput: hostUseInput,
+		input: { draft: 'props 回退草稿' },
+		inputActions: { setDraft() {} },
+	};
+	const lockRenderer = createRenderer(bar, lockProps);
+	lockRenderer.render();
+	for (let i = 0; i < 8; i++) await Promise.resolve();
+	// hook 快照优先于 props.input：点击优化发出的正文必须是 hook 提供的草稿。
+	clickOptimizeOn(lockRenderer);
+	const hookRequest = optimizeRequests.at(-1);
+	resolveRequest(hookRequest, { ok: true, text: 'hook 结果' });
+	for (let i = 0; i < 8; i++) await Promise.resolve();
+	const hookDraft = JSON.parse(hookRequest.options.body).text;
+	if (hookDraft !== 'hook 草稿') throw new Error('useInput snapshot did not take precedence over props.input: ' + hookDraft);
+
+	// prop 变成 undefined 后锁定的引用仍被调用；换成新函数则绝不能被调用。
+	const beforeDetach = useInputCalls;
+	lockProps.useInput = undefined;
+	lockRenderer.render();
+	if (useInputCalls === beforeDetach) throw new Error('locked useInput ref stopped being called after prop disappeared');
+	const beforeSwap = useInputCalls;
+	let secondCalls = 0;
+	lockProps.useInput = function () { secondCalls += 1; throw new Error('a late-prop useInput must never be called'); };
+	lockRenderer.render(); // 不抛 = 锁定的仍是首渲染引用
+	if (useInputCalls !== beforeSwap + 1) throw new Error('locked ref was not called on the next render (hook chain changed)');
+	if (secondCalls !== 0) throw new Error('useInput ref was not locked to the first render');
+
+	// 反向：首渲染没有 useInput 时，之后才出现也绝不能开始调用（hook 链稳定，
+	// 与旧 host 的 props.input 回退兼容）。
+	const lateProps = { sessionId: 'session-late', input: { draft: 'props 回退草稿' }, inputActions: { setDraft() {} } };
+	const lateRenderer = createRenderer(bar, lateProps);
+	lateRenderer.render();
+	for (let i = 0; i < 8; i++) await Promise.resolve();
+	const beforeLate = useInputCalls;
+	lateProps.useInput = hostUseInput;
+	lateRenderer.render();
+	if (useInputCalls !== beforeLate) throw new Error('late-arriving useInput started being called (hook chain changed)');
+	// 草稿仍从 props.input 读取：回退路径不受影响。
+	lateProps.input.draft = '回退草稿可用';
+	lateRenderer.render();
+	clickOptimizeOn(lateRenderer);
+	const fallbackRequest = optimizeRequests.at(-1);
+	resolveRequest(fallbackRequest, { ok: true, text: '回退结果' });
+	for (let i = 0; i < 8; i++) await Promise.resolve();
+	if (JSON.parse(fallbackRequest.options.body).text !== '回退草稿可用') {
+		throw new Error('props.input fallback broke when useInput was never locked in');
+	}
+	lateRenderer.unmount();
+	lockRenderer.unmount();
+}
+
 ctxRenderer.unmount();
-console.log('client lifecycle: manual edit, cancel/retry, unmount guards, missing-context notice, error body, warnings/stats, busy controls, keyboard a11y, and catalog failure passed');
+console.log('client lifecycle: manual edit, cancel/retry, unmount guards, missing-context notice, error body, warnings/stats, busy controls, keyboard a11y, catalog failure, and useInput ref lock passed');

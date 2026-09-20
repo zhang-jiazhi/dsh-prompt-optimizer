@@ -1,2 +1,7 @@
 node_modules/
 *.log
+
+# 会话工作记录与本地产物（非发布内容）
+codex-session-records/
+.DS_Store
+*.bak-*
