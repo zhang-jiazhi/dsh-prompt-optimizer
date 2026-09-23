@@ -53,26 +53,46 @@ console.log('\nslots registered:', slotRegistry.map(s=>s.meta.name+'#'+s.meta.id
 if (failures.length > 0) { console.error('\n失败: ' + failures.join('; ')); process.exit(1); }
 if (slotRegistry.length !== 2) { console.error('\n失败: 插槽注册数不为 2'); process.exit(1); }
 
-// The settings service may be injected after the client plugin mounts.
-let bindCalls = 0;
+// 0.1.7 规范：设置表单由宿主 configForms 按 entry id 提供，服务可能晚于插件出现。
+let formGets = [];
 const bound = {
   getSnapshot: () => ({ value: { provider: 'late-provider' }, writable: true }),
   subscribe: () => () => {},
   set: () => Promise.resolve(),
 };
-const lateBinder = { bind: () => { bindCalls += 1; return bound; } };
+const lateConfigForms = { get: (entryId) => { formGets.push(entryId); return bound; } };
 effects.length = 0; slotRegistry.length = 0;
 const strictContext = {
   slots,
   get: () => undefined,
-  inject: (deps, callback) => { if (deps[0] === 'settingsScope') callback({ settingsScope: lateBinder }); },
+  inject: (deps, callback) => { if (deps[0] === 'configForms') callback({ configForms: lateConfigForms }); },
 };
-Object.defineProperty(strictContext, 'settingsScope', { get() { throw new Error('undeclared direct property read'); } });
+Object.defineProperty(strictContext, 'configForms', { get() { throw new Error('undeclared direct property read'); } });
 captured.exports.apply(strictContext);
 const lateSection = slotRegistry.find((s) => s.meta.name === 'settings.section');
 lateSection.comp();
 effects.forEach((fn) => fn());
-if (bindCalls !== 1) throw new Error('late settingsScope was not bound through nested injection');
+if (formGets.length !== 1) throw new Error('late configForms was not bound through nested injection');
+if (formGets[0] !== 'dsh-prompt-optimizer-host') {
+  throw new Error('settings namespace must be the Host profile entry id, got: ' + formGets[0]);
+}
+console.log('late configForms: nested bind used entry id ' + formGets[0]);
+
+// 旧宿主回落：只有 settingsScope 时仍按旧命名空间绑定，工具栏与分区页不受影响。
+let bindCalls = 0;
+const lateBinder = { bind: () => { bindCalls += 1; return bound; } };
+effects.length = 0; slotRegistry.length = 0;
+const legacyContext = {
+  slots,
+  get: () => undefined,
+  inject: (deps, callback) => { if (deps[0] === 'settingsScope') callback({ settingsScope: lateBinder }); },
+};
+captured.exports.apply(legacyContext);
+const legacySection = slotRegistry.find((s) => s.meta.name === 'settings.section');
+legacySection.comp();
+effects.forEach((fn) => fn());
+if (bindCalls !== 1) throw new Error('legacy settingsScope fallback was not bound through nested injection');
+console.log('legacy settingsScope: fallback bind path passed');
 
 // A dynamic facade may expose optional lookup but reject nested injection verbs.
 effects.length = 0; slotRegistry.length = 0;

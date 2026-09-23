@@ -1,6 +1,8 @@
 // 宿主最小验证：mock webServer/llm/settings/agentDefaultModel/sessionQuery，
 // 走通模板目录、优化、上下文、未知模板、空文本、取消、越权七条路径。
-import { apply, settingsReady } from '../lib/index.js';
+// 设置面按 0.1.7 规范验证：Config 导出 + 全字段 volatile + configure({auto:false})
+// + apply 收到的 config 里 volatile 引用可被解包读取。
+import { apply, Config } from '../lib/index.js';
 
 const routes = new Map();
 const llmCalls = [];
@@ -40,16 +42,40 @@ fakeCtx.services.sessionQuery = {
 		],
 	}),
 };
-let settingsNsSeen = null;
-let settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
+let settingsConfigureSeen = null;
 fakeCtx.services.settings = {
-	register(ns) {
-		settingsNsSeen = ns;
-		return { get: () => settingsValue };
+	// 0.1.7：服务只留 configure/describe/update；插件不再注册命名空间，
+	// 而是用 configure({auto:false}) 声明「自建设置页、不要宿主自动生成」。
+	configure(presentation, owner) {
+		settingsConfigureSeen = { presentation, owner };
+		return () => {};
 	},
 };
 // 宿主 ctx.inject(['settings'], cb) 回调里访问 sctx.settings；mock 挂同名属性。
 fakeCtx.settings = fakeCtx.services.settings;
+// 插件用 sctx.effect(...) 登记 configure 的生命周期；mock 立即执行并返回 disposer。
+fakeCtx.effect = (fn) => {
+	const disposer = fn();
+	return typeof disposer === 'function' ? disposer : () => {};
+};
+
+/** 模拟宿主 resolveConfig 之后的 volatile 字段引用（0.1.7 配置协议）。 */
+const VOLATILE_WRITE = Symbol.for('cosmokit.volatile.write');
+const volatileRef = (value) => ({ get: () => value, [VOLATILE_WRITE]: () => {} });
+
+/**
+ * 当前生效的设置值。测试通过整体替换本对象模拟「设置页改动」；下面
+ * volatileView() 的 get() 每次读它，因此替换后下一次优化立即生效 ——
+ * 与真实宿主的 volatile 引用语义一致（改动即时生效、不重挂载）。
+ */
+let settingsValue = { temperature: 0.5, maxTokens: 999, reasoningEffort: 'low' };
+
+/** 构造宿主会传给 apply 的 config：9 个字段全是 volatile 引用。 */
+const CONFIG_KEYS = ['provider', 'model', 'temperature', 'reasoningEffort', 'maxTokens', 'timeoutMs', 'maxInputChars', 'contextMaxMessages', 'contextMaxChars'];
+const volatileView = () => Object.fromEntries(CONFIG_KEYS.map((key) => [key, {
+	get: () => settingsValue[key],
+	[VOLATILE_WRITE]: (next) => { settingsValue[key] = next; },
+}]));
 
 function fakeRes() {
 	// 忠实一点的响应替身：真实 ServerResponse 在「响应结束」和「连接断开」两种情况
@@ -101,24 +127,33 @@ async function callOptimize(payload) {
 	return { res, req, handled };
 }
 
-apply(fakeCtx);
-// schemastery 改为动态导入后，设置注册在下一个微任务完成；settingsReady 是
-// 模块级 live binding，apply 之后重新读取即可拿到本次注册的 promise。
-await settingsReady;
+// 0.1.7 规范：配置由宿主按 Config schema 解析后作为第二个参数传入 apply；
+// 这里用 volatile 引用传入，同时验证「解包后生效」与「configure 页面策略」。
+apply(fakeCtx, volatileView());
 console.log('① 注册的路由:', [...routes.keys()]);
-if (settingsNsSeen !== 'dsh-prompt-optimizer') throw new Error('settings 命名空间未注册');
+if (!settingsConfigureSeen) throw new Error('settings.configure 未调用（0.1.7 设置页策略缺失）');
+if (settingsConfigureSeen.presentation?.auto !== false) {
+	throw new Error('configure 未关闭宿主自动页面（与自建设置分区页配套，避免重复入口）');
+}
 
-// 0. 设置 schema 工厂：真实 schemastery 下默认值可解析（依赖缺失时 apply 会降级）。
+// 0. 设置声明：Config 必须是可被宿主投影的 schema，且字段全部 volatile。
 {
-	const { buildConfigSchema } = await import('../lib/index.js');
-	const z = (await import('@deepseek-ai/schemastery')).default;
-	const schema = buildConfigSchema(z);
-	const resolved = schema({});
-	console.log('⓪ 设置 schema 默认:', resolved.reasoningEffort, resolved.maxTokens, resolved.contextMaxChars);
-	if (resolved.reasoningEffort !== 'inherit' || resolved.maxTokens !== 8192 || resolved.contextMaxChars !== 4000) {
-		throw new Error('设置 schema 默认值不符');
+	const fields = Object.entries(Config.dict ?? {});
+	if (fields.length !== 9) throw new Error('Config 字段数不符：' + fields.length);
+	const notVolatile = fields.filter(([, f]) => f.meta?.volatile !== true).map(([k]) => k);
+	if (notVolatile.length > 0) throw new Error('非 volatile 字段不会被设置页投影：' + notVolatile.join(', '));
+	// 解析输出里 volatile 字段保持为引用对象（这正是宿主传给 apply 的形状，
+	// 也是插件内 unwrap 必须存在的原因）；断言前先解包。
+	const plain = (value) => (value !== null && typeof value === 'object' && VOLATILE_WRITE in value ? value.get() : value);
+	const resolved = Config({});
+	const effort = plain(resolved.reasoningEffort);
+	const tokens = plain(resolved.maxTokens);
+	const contextChars = plain(resolved.contextMaxChars);
+	console.log('⓪ Config 默认:', effort, tokens, contextChars, '·字段', fields.length, '全 volatile');
+	if (effort !== 'inherit' || tokens !== 8192 || contextChars !== 4000) {
+		throw new Error('设置 schema 默认值不符：' + JSON.stringify([effort, tokens, contextChars]));
 	}
-	if (typeof schema.toJSON() !== 'object' || schema.toJSON() === null) throw new Error('设置 schema toJSON 不符');
+	if (typeof Config.toJSON() !== 'object' || Config.toJSON() === null) throw new Error('设置 schema toJSON 不符');
 }
 
 // 1. 模板目录

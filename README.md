@@ -29,7 +29,9 @@
   - **模板文件**：每个模板一个 `templates/<id>.md`（首行 JSON 头 + 正文；`<!-- USER -->` 分隔 system/user），公共理念段在 `templates/_shared/*.md` 用 `{{include:name}}` 引用，改总纲只改一个文件
 - **模型调用**：走 DSH 宿主 `ctx.llm` 服务，默认跟随 DSH 默认模型，不直连任何 API、不触碰凭据；提供方与模型 ID 同时填写时覆盖默认路由；推理强度默认 `inherit`（**不指定，由模型默认决定**，不再跟随主模型的 max 档——优化是轻量任务，跟随 max 会让每次点击多等十几秒）
 - **请求边界**：仅接受 loopback、同源请求；请求体有大小上限；客户端断开会中止模型流；上下文读取与模型执行均受可清理 deadline 约束，兼容忽略 `signal` 的旧适配器；输出守卫只检测/规范化，不自动重试
-- **设置页**：设置 → 侧边栏「提示词优化」独立分区，可配：模型提供方/ID（覆盖默认路由）、推理强度、采样温度、输出 token 上限、超时、输入长度上限、上下文条数与字符预算；改动即时生效并持久化。`settingsScope` 按可选服务注入，缺失时工具栏仍可用（设置分区会显示"命名空间不可用"的提示，不会白屏）
+- **设置页**：设置 → 侧边栏「提示词优化」独立分区，可配：模型提供方/ID（覆盖默认路由）、推理强度、采样温度、输出 token 上限、超时、输入长度上限、上下文条数与字符预算；改动即时生效并持久化。
+  - **0.1.7 规范（2026-09-22 迁移）**：宿主已删除 `settings.register()`，插件改为导出 `Config`（schemastery schema，9 个字段全部 `.volatile()`），由宿主 configEditor 投影设置表单；命名空间 = profile entry id `dsh-prompt-optimizer-host`。因本插件自建上述分区页，宿主侧用 `settings.configure({ auto: false })` 关闭自动页面生成，避免同一份配置出现两个入口。设置表单服务（`configForms`）按可选服务解析：拿不到时工具栏仍可用，设置分区显示降级提示，不会白屏；旧宿主（只有 `settingsScope`）自动回落旧绑定方式。
+  - `volatile` 语义：宿主传给 `apply` 的 config 里，volatile 字段是 `{ get(), [Symbol.for('cosmokit.volatile.write')]() }` 引用（改动即时生效、不重挂载），插件读取前会解包 —— 这是 0.1.7 配置协议，也是「设置页改了立刻生效」的实现方式。
   - 推理强度默认 `inherit` = 不指定，由模型/适配器默认决定；显式选 `off/low/medium/high/max` 才覆盖。各家模型支持的档位不同（DeepSeek 只接受 off/low/high/max，没有 medium），选到不支持的档位时宿主会丢掉该覆盖、按模型默认档位**自动重试一次**并记 warn 日志，不会把整次优化打成失败
 
 ## 安装（本地插件）
@@ -53,7 +55,7 @@ cd ~/.dsh/profiles/web && pnpm install
 dsh web
 ```
 
-> schemastery 只用于注册设置 schema，而且是动态加载：即使它缺失，插件也会降级为内置默认配置并继续提供优化功能（日志里记一条 warn），不会让整个插件树加载失败。所以"依赖装漏了"最坏只是设置页不可用，不会导致插件消失。
+> schemastery 用于声明设置 schema（0.1.7 起是模块顶层 `import` 的 `Config` 导出，宿主据此投影设置页）。要求 **≥ 3.18.3**：`.volatile()` 标记是 0.1.7 设置规范的必需项（3.18.1 没有该方法，会导致插件加载即抛）。宿主树与 web profile 均自带 3.18.3。
 
 ## 测试
 
@@ -66,7 +68,8 @@ npm test          # 宿主 + 客户端兼容性/生命周期验证，无需启�
   新增 P0-1 上下文预算（保最新、超长单条保尾部）、输出守卫（占位符/角色卡/注水/前缀）、约束账本（⑯h）、
   图像模板语言跟随（⑮）、usage 透传、`inherit` 不传档位、模板外置加载与图生图"不读取图片"声明回归。
 - `test/client-smoke.mjs`：用最小 React/DOM 替身加载 `lib/client.js`，验证两个插槽注册、
-  可选 `settingsScope`（undefined / null / 无 `.bind`）兼容、服务晚到时的嵌套 bind，以及 dynamic-like facade
+  0.1.7 的 `configForms` 晚到注入（断言按 Host entry id 取表单）、旧宿主 `settingsScope` 回落绑定、
+  可选服务缺失（undefined / null / 无 `.bind`）兼容，以及 dynamic-like facade
   不支持 nested inject 时仍保留工具栏。
 - `test/client-lifecycle-smoke.mjs`：验证等待期间手动编辑不被覆盖、取消后立即重试、切换会话、卸载组件时的
   AbortController 与 request identity 防护，旧响应不能写入新草稿；新增非 2xx 错误体透传、告警/耗时/token 展示、
